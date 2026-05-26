@@ -1,0 +1,203 @@
+---
+title: "Analisis Perilaku Pelanggan - Database Sakila"
+author: "Muhammad Farel Arrauf | M0725045 | B"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    highlight: tango
+---
+
+```{css, echo=FALSE}
+body { font-family: 'Segoe UI', sans-serif; font-size: 14px; color: #2c3e50; }
+h2   { color: #2563EB; }
+.insight-box { background: #EFF6FF; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5)
+library(RMySQL)
+library(dplyr)
+library(ggplot2)
+```
+
+---
+
+# Deskripsi Insight
+
+<div class="insight-box">
+**Pertanyaan:** Bagaimana pola perilaku pelanggan dalam menyewa film di toko Sakila? Siapa pelanggan bernilai tinggi yang perlu diprioritaskan?
+</div>
+
+Analisis ini menggunakan metode **RFM (Recency, Frequency, Monetary)** untuk memetakan perilaku 599 pelanggan berdasarkan riwayat transaksi sewa dan pembayaran di database Sakila.
+
+| Variabel  | Keterangan                          |
+|-----------|-------------------------------------|
+| Recency   | Hari sejak transaksi terakhir       |
+| Frequency | Jumlah total transaksi sewa         |
+| Monetary  | Total pengeluaran pelanggan (USD)   |
+
+---
+
+# Pengambilan Data
+
+```{r data}
+con <- dbConnect(RMySQL::MySQL(), dbname = "sakila", host = "127.0.0.1",
+                 port = 3306, user = "root", password = "Surorejo01")
+
+df <- dbGetQuery(con, "
+  SELECT c.customer_id,
+         CONCAT(c.first_name, ' ', c.last_name) AS nama,
+         MAX(r.rental_date)          AS last_rental,
+         COUNT(DISTINCT r.rental_id) AS frequency,
+         SUM(p.amount)               AS monetary
+  FROM customer c
+  JOIN rental  r ON c.customer_id = r.customer_id
+  JOIN payment p ON r.rental_id   = p.rental_id
+  GROUP BY c.customer_id, c.first_name, c.last_name
+")
+dbDisconnect(con)
+
+rfm <- df %>%
+  mutate(
+    last_rental = as.Date(last_rental),
+    recency     = as.numeric(as.Date("2006-02-15") - last_rental),
+    monetary    = round(as.numeric(monetary), 2)
+  )
+
+glimpse(rfm)
+```
+
+---
+
+# Analisis RFM
+
+## Skoring
+
+Formula skoring menggunakan **kuintil** — setiap variabel dibagi 5 kelompok dengan skor 1–5.
+
+$$\text{RFM Score} = R\_Score + F\_Score + M\_Score$$
+
+Untuk Recency, skor dibalik karena nilai recency rendah (transaksi lebih baru) justru lebih baik:
+
+$$R\_Score = 6 - \text{kuintil}(Recency)$$
+
+```{r scoring}
+q_score <- function(x, rev = FALSE) {
+  s <- cut(x, breaks = unique(quantile(x, seq(0, 1, 0.2))),
+           labels = FALSE, include.lowest = TRUE)
+  s[is.na(s)] <- 1
+  if (rev) 6 - s else s
+}
+
+df_seg <- rfm %>%
+  mutate(
+    R      = q_score(recency,   rev = TRUE),
+    F      = q_score(frequency),
+    M      = q_score(monetary),
+    RFM    = R + F + M,
+    Segmen = case_when(
+      RFM >= 13 ~ "VVIP",
+      RFM >= 10 ~ "Setia",
+      RFM >= 7  ~ "Lumayan Setia",
+      RFM >= 4  ~ "Hampir Ga Setia",
+      TRUE      ~ "Ga Setia"
+    )
+  )
+```
+
+## Statistik Deskriptif
+
+```{r deskriptif}
+summary(rfm[, c("recency", "frequency", "monetary")])
+```
+
+## Distribusi Segmen
+
+```{r tabel-segmen}
+df_seg %>%
+  group_by(Segmen) %>%
+  summarise(Jumlah = n(), Avg_Freq = round(mean(frequency), 1),
+            Avg_Monetary = round(mean(monetary), 2),
+            Total_Rev = round(sum(monetary), 2)) %>%
+  arrange(desc(Total_Rev))
+```
+
+---
+
+# Visualisasi Data
+
+## 1. Distribusi Frequency dan Monetary
+
+```{r vis-distribusi, fig.height=4}
+par(mfrow = c(1, 2))
+hist(rfm$frequency, col = "#93C5FD", border = "white",
+     main = "Distribusi Frequency", xlab = "Jumlah Sewa", ylab = "Pelanggan")
+abline(v = mean(rfm$frequency), col = "red", lty = 2, lwd = 2)
+
+hist(rfm$monetary, col = "#86EFAC", border = "white",
+     main = "Distribusi Monetary", xlab = "Total Pengeluaran (USD)", ylab = "Pelanggan")
+abline(v = mean(rfm$monetary), col = "red", lty = 2, lwd = 2)
+```
+
+**Interpretasi:** Distribusi *frequency* cenderung mendekati simetris, menunjukkan sebagian besar pelanggan memiliki jumlah sewa yang hampir sama. Sebaliknya, distribusi *monetary* cenderung miring kanan, artinya mayoritas pelanggan memiliki pengeluaran rendah hingga menengah, namun ada sebagian kecil pelanggan dengan pengeluaran yang jauh di atas rata-rata (garis merah menunjukkan mean).
+
+---
+
+## 2. Distribusi Segmen Pelanggan
+
+```{r vis-segmen}
+ggplot(df_seg, aes(x = Segmen, fill = Segmen)) +
+  geom_bar(show.legend = FALSE) +
+  labs(title = "Distribusi Segmen Pelanggan RFM", x = "Segmen", y = "Jumlah Pelanggan") +
+  theme_minimal()
+```
+
+**Interpretasi:** Segmen **Lumayan Setia** dan **Setia** mendominasi jumlah pelanggan, menandakan sebagian besar pelanggan sudah cukup aktif namun belum mencapai level terbaik. Segmen **VVIP** relatif sedikit karena segmen ini hanya diisi pelanggan dengan skor RFM paling tinggi. Segmen **Ga Setia** perlu mendapat perhatian khusus.
+
+---
+
+## 3. Hubungan Frequency dan Monetary
+
+```{r vis-scatter}
+ggplot(df_seg, aes(x = frequency, y = monetary, color = Segmen)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Hubungan Frequency dan Monetary",
+       x = "Frekuensi Sewa", y = "Total Pengeluaran (USD)") +
+  theme_minimal()
+```
+
+**Interpretasi:** Scatter plot menunjukkan pola sebaran yang jelas ke arah kanan atas — semakin tinggi frekuensi sewa, semakin besar pula total pengeluaran pelanggan. Titik-titik berwarna yang merupakan pelanggan dengan segmen **VVIP** (skor tertinggi) terkonsentrasi di sudut kanan atas, mengonfirmasi bahwa segmen ini memang unggul di kedua dimensi sekaligus.
+
+---
+
+# Analisis Statistik: Korelasi Pearson
+
+$$r = \frac{\sum(F_i - \bar{F})(M_i - \bar{M})}{\sqrt{\sum(F_i - \bar{F})^2 \cdot \sum(M_i - \bar{M})^2}}$$
+
+```{r korelasi}
+uji <- cor.test(df_seg$frequency, df_seg$monetary, method = "pearson")
+cat("Koefisien Korelasi (r) :", round(uji$estimate, 4), "\n")
+cat("p-value                :", format(uji$p.value, scientific = TRUE), "\n")
+cat("Interval Kepercayaan   :", round(uji$conf.int, 4), "\n")
+```
+
+---
+
+# Interpretasi
+
+**1. Distribusi RFM**
+Mayoritas pelanggan memiliki pola sewa aktif. Distribusi *monetary* bersifat miring kanan, artinya sebagian kecil pelanggan berkontribusi jauh lebih besar dari rata-rata.
+
+**2. Segmentasi**
+Segmen **VVIP** adalah pelanggan dengan transaksi paling baru, paling sering, dan pengeluaran terbesar — penggerak utama revenue. Segmen **Ga Setia** perlu adanya tindakan agar pelanggan tidak benar benar pergi.
+
+**3. Korelasi Frequency–Monetary**
+Korelasi Pearson menunjukkan hubungan **positif dan signifikan** yang sangat kuat, artinya pelanggan yang lebih sering menyewa cenderung memiliki pengeluaran lebih tinggi.
+
+---
+
+*Laporan dibuat dengan R-Markdown | Database Sakila | Sistem Informasi Manajemen*
